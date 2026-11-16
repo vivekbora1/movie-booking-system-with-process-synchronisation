@@ -38,22 +38,25 @@ let isDbConnected = false;
 
 // Initialize MySQL Connection
 async function initDatabase() {
-  if (!mysql) return;
+  if (!mysql) return false;
   try {
-    // 1. First test root connection to verify MySQL server is running
+    // 1. Test root connection to verify MySQL server is running
     const testConn = await mysql.createConnection({
       host: DB_CONFIG.host,
       user: DB_CONFIG.user,
       password: DB_CONFIG.password,
-      port: DB_CONFIG.port
+      port: DB_CONFIG.port,
+      connectTimeout: 2000
     });
 
     // Ensure database exists
     await testConn.query(`CREATE DATABASE IF NOT EXISTS \`${DB_CONFIG.database}\`;`);
     await testConn.end();
 
-    // 2. Create connection pool to cinema_booking database
-    pool = mysql.createPool(DB_CONFIG);
+    // 2. Create connection pool to cinema_booking database if not already created
+    if (!pool) {
+      pool = mysql.createPool(DB_CONFIG);
+    }
 
     // Verify pool connection
     const [rows] = await pool.query('SELECT 1 + 1 AS result');
@@ -69,23 +72,29 @@ async function initDatabase() {
         : path.join(__dirname, 'cpp-backend', 'schema.sql');
       if (fs.existsSync(schemaFile)) {
         const sql = fs.readFileSync(schemaFile, 'utf8');
-        // Execute multiple statements
         const statements = sql.split(';').map(s => s.trim()).filter(s => s.length > 0);
         for (const stmt of statements) {
           try { await pool.query(stmt); } catch (err) { /* ignore safe dup errors */ }
         }
         console.log('✅ [MYSQL INIT] Schema and seed data successfully initialized in XAMPP MySQL!');
       }
-    } else {
-      console.log(`📊 [MYSQL TABLES] Found ${tables.length} tables in cinema_booking (ready for live sync).`);
     }
-
+    return true;
   } catch (err) {
     isDbConnected = false;
-    console.error(`\n❌ [MYSQL ERROR] Could not connect to XAMPP MySQL: ${err.message}`);
-    console.log('💡 Note: If XAMPP is running, ensure MySQL module is started (port 3306). Server will continue in fallback mode.\n');
+    return false;
   }
 }
+
+// Auto-reconnect timer: Every 3 seconds, if not connected, attempt connection
+setInterval(async () => {
+  if (!isDbConnected) {
+    const ok = await initDatabase();
+    if (ok) {
+      console.log('🔄 [MYSQL AUTO-RECONNECTED] Successfully reconnected to XAMPP MySQL!');
+    }
+  }
+}, 3000);
 
 // MIME Types Map
 const MIME_TYPES = {
@@ -121,10 +130,11 @@ const server = http.createServer(async (req, res) => {
   const parsedUrl = url.parse(req.url, true);
   let pathname = parsedUrl.pathname;
 
-  // CORS Headers
+  // CORS Headers & Chrome Private Network Access support (for file:// or localhost)
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.setHeader('Access-Control-Allow-Private-Network', 'true');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -138,8 +148,11 @@ const server = http.createServer(async (req, res) => {
   if (pathname.startsWith('/api/')) {
     res.setHeader('Content-Type', 'application/json');
 
-    // 1. Health & Database Status
+    // 1. Health & Database Status (Auto-attempts connection if offline)
     if (pathname === '/api/status' || pathname === '/api/health') {
+      if (!isDbConnected) {
+        await initDatabase();
+      }
       res.writeHead(200);
       res.end(JSON.stringify({
         status: 'online',
@@ -147,6 +160,18 @@ const server = http.createServer(async (req, res) => {
         database: DB_CONFIG.database,
         host: `${DB_CONFIG.host}:${DB_CONFIG.port}`,
         user: DB_CONFIG.user
+      }));
+      return;
+    }
+
+    // Force Reconnection Attempt
+    if (pathname === '/api/reconnect') {
+      const ok = await initDatabase();
+      res.writeHead(200);
+      res.end(JSON.stringify({
+        success: ok,
+        mysql_connected: isDbConnected,
+        database: DB_CONFIG.database
       }));
       return;
     }

@@ -371,21 +371,54 @@ async function checkBackendConnection() {
     if (res.ok) {
       const data = await res.json();
       if (data.mysql_connected) {
-        isBackendLive = true;
-        updateDbStatusUI(true, data);
-        Logger.log("SYSTEM", `Connected directly to XAMPP MySQL (Host: ${data.host}, DB: ${data.database}). Live sync active!`);
-        await syncDataFromMySQL();
+        if (!isBackendLive) {
+          isBackendLive = true;
+          updateDbStatusUI(true, data);
+          Logger.log("SYSTEM", `Connected directly to XAMPP MySQL (${data.host}, DB: ${data.database}). Live sync active!`);
+          await syncDataFromMySQL();
+        }
         return true;
       }
     }
   } catch (e) {
     // Backend server not currently listening on port 3000
   }
+  if (isBackendLive) {
+    Logger.log("WARN", "Lost connection to XAMPP MySQL backend. Switched to offline browser mode.");
+  }
   isBackendLive = false;
   updateDbStatusUI(false);
-  Logger.log("WARN", "Server not detected on port 3000. Running in offline browser storage mode.");
   return false;
 }
+
+async function manualReconnect() {
+  const btn = document.getElementById("reconnectBtn");
+  const text = document.getElementById("mysqlStatusText");
+  if (btn) btn.innerHTML = `<i data-lucide="loader" class="w-3.5 h-3.5 animate-spin"></i> Checking...`;
+  if (text) text.innerText = "CONNECTING...";
+  setupLucideIcons();
+
+  try {
+    await fetch(`${API_BASE}/api/reconnect`, { cache: 'no-store' });
+  } catch (e) {}
+
+  const connected = await checkBackendConnection();
+  if (btn) btn.innerHTML = `<i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Reconnect Now`;
+  setupLucideIcons();
+
+  if (connected) {
+    alert("✅ Connected directly to XAMPP MySQL!\nLive two-way database sync is active.");
+  } else {
+    alert("⚠️ Could not connect to MySQL.\n\nPlease check:\n1. Is MySQL started (green) in XAMPP Control Panel?\n2. Did you launch start.bat (or run 'node server.js')?\n3. Are you visiting http://localhost:3000 in your browser (not file:///)?");
+  }
+}
+
+// Background poll: Every 3 seconds, if offline, automatically try connecting to MySQL
+setInterval(async () => {
+  if (!isBackendLive) {
+    await checkBackendConnection();
+  }
+}, 3000);
 
 async function syncDataFromMySQL() {
   if (!isBackendLive) return;
